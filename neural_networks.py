@@ -138,7 +138,7 @@ class NeuralNetwork():
                 weighted_loss = -np.sum(self.class_weights * Y * np.log(y_pred + 1e-15), axis=1)
                 loss = np.mean(weighted_loss)  # Average loss over batch
             else:
-                loss = -np.sum(Y * np.log(y_pred + 1e-15)) / Y.shape[1]  # divide by batch size
+                loss = -np.mean(np.sum(Y * np.log(y_pred + 1e-15), axis=1))  # divide by batch size
         # loss = np.mean(np.power(y_pred - Y, 2), axis=1)/2
 
         return loss
