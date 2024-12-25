@@ -1,16 +1,17 @@
 import numpy as np
 class NeuralNetwork():
-    def __init__(self, input_size, output_size, architecture, loss):
+    def __init__(self, input_size, architecture, activations, loss, class_weights=None):
         self.input_size = input_size
-        self.output_size = output_size
         self.architecture = architecture
+        self.output_size = self.architecture[-1]
+        self.activations = activations
         self.num_layers = len(self.architecture)
         self.loss = loss
-        self.parameters = self.initialize_parameters()
+        self.class_weights = class_weights
         self.iteration = 0
-        self.learning_rate = 0.01  # Increased initial learning rate
-        self.weight_clip_value = 5.0
-        self.grad_clip_value = 1.0
+        self.parameters = self.initialize_parameters()
+        self.grads = {}
+
 
 
     def initialize_parameters(self):
@@ -23,8 +24,8 @@ class NeuralNetwork():
                 fan_in = self.architecture[i-1]
                 fan_out = self.architecture[i]
 
-            parameters['W' + str(i + 1)] = np.random.randn(fan_out, fan_in)*0.01
-            parameters['b' + str(i + 1)] = np.zeros((fan_out, 1))*0.01
+            parameters['W' + str(i + 1)] = np.random.randn(fan_out, fan_in)*np.sqrt(2/fan_in)
+            parameters['b' + str(i + 1)] = np.zeros((fan_out, 1))
         return parameters
     
 
@@ -34,12 +35,62 @@ class NeuralNetwork():
         return np.clip(z, -1e10, 1e10)  # Prevent extreme values
     
     def activation(self, Z, activation):
-        if activation == 'relu':
-            g = np.maximum(0, Z)
+        """
+        Function Description: activation
+        The activation function applies the specified activation function to the input Z, commonly used in neural networks.
 
-        elif activation == "linear":
-            g = Z
-        return g
+        Parameters:
+        Z (numpy array): Input array, typically the pre-activation output of a neural network layer.
+        activation (string): The activation function to apply. Supported options:
+        - 'ReLU': Rectified Linear Unit (max(0, Z)).
+        - 'Leaky_ReLU': Allows small gradients for negative values (Z > 0 ? Z : 0.01 * Z).
+        - 'ELU': Smooths negative values (Z > 0 ? Z : 0.1 * (exp(Z) - 1)).
+        - 'Linear': Linear activation (Z).
+        - 'Sigmoid': Squeezes values to [0, 1] (1 / (1 + exp(-Z))).
+        - 'Softmax': Converts logits to probabilities, with numerical stability (exp(Z - max(Z)) / sum(exp(Z))).
+        Returns:
+        - a (numpy array): Output after applying the activation function.
+        Notes:
+        Raises ValueError for unsupported activation names.
+        Softmax implementation ensures numerical stability.
+        """
+
+        if activation == 'ReLU':
+            a = np.maximum(0, Z)
+            grad = (Z > 0).astype(float)  # Derivative: 1 for Z > 0, 0 otherwise
+        
+        elif activation == "Leaky_ReLU":
+            a = np.where(Z > 0, Z, 0.01 * Z)
+            grad = np.where(Z > 0, 1, 0.01)  # Derivative: 1 for Z > 0, 0.01 otherwise
+        
+        elif activation == "ELU":
+            alpha = 0.1
+            a = np.where(Z > 0, Z, alpha * (np.exp(Z) - 1))
+            grad = np.where(Z > 0, 1, alpha * np.exp(Z))  # Derivative: exp(Z) * alpha for Z <= 0
+
+        elif activation == "Linear":
+            a = Z
+            grad = np.ones_like(Z)  # Derivative: 1 everywhere
+
+        elif activation == 'Sigmoid':
+            a = 1/(1+ np.exp(-Z))
+            grad = a * (1 - a)  # Derivative: sigmoid(Z) * (1 - sigmoid(Z))
+
+        elif activation == 'Softmax':
+            exp_Z = np.exp(Z - np.max(Z, axis=0, keepdims=True))
+            a = exp_Z/np.sum(exp_Z, axis=0, keepdims=True)
+            grad = a * (1 - a)  # Jacobian diagonal approximation for simplicity
+
+        else:
+            raise ValueError(f"Unknown activation function: {activation}")
+        activation_cache = (a, grad)
+        return a, activation_cache
+    
+
+    def clip_gradients(self, grads, threshold=1.0):
+        for key in grads:
+            grads[key] = np.clip(grads[key], -threshold, threshold)
+        return grads
 
     def forward_propagation(self, inputs):
         caches = []
@@ -51,14 +102,14 @@ class NeuralNetwork():
             
             Z = self.linear(W, A_prev, b)
 
-            if i == self.num_layers-1:
-                A = self.activation(Z=Z, activation='linear')
-            else:
-                A = self.activation(Z=Z, activation='relu')
+            
+            A, activation_cache = self.activation(Z=Z, activation=self.activations[i])
+            
                         
             fw_cache = (W, A_prev, Z)
             A_prev = A
-            caches.append(fw_cache)
+            cache = (fw_cache, activation_cache)
+            caches.append(cache)
         
         return caches, A
     
@@ -77,36 +128,56 @@ class NeuralNetwork():
         epsilon = 1e-15  # Small value to avoid numerical instability
         y_pred = np.clip(y_pred, epsilon, 1 - epsilon)  # Clip predictions to avoid log(0)
         m = Y.shape[1]
-        loss = np.mean(np.power(y_pred - Y, 2), axis=1)/2
+        if self.loss == "MSE":
+            loss = np.mean((y_pred - Y) ** 2, axis=1) / 2
+        elif self.loss == "BCE":
+            loss = -np.mean(Y * np.log(y_pred) + (1 - Y) * np.log(1 - y_pred), axis=1)
+        elif self.loss == "CCE":
+            # loss = -np.mean(np.sum(Y * np.log(y_pred), axis=1))
+            if self.class_weights is not None:
+                weighted_loss = -np.sum(self.class_weights * Y * np.log(y_pred + 1e-15), axis=1)
+                loss = np.mean(weighted_loss)  # Average loss over batch
+            else:
+                loss = -np.sum(Y * np.log(y_pred + 1e-15)) / Y.shape[1]  # divide by batch size
+        # loss = np.mean(np.power(y_pred - Y, 2), axis=1)/2
 
         return loss
 
    
     def back_propagation(self, y_pred, Y, caches):
-        grads = {}
+        # grads = {}
         m = Y.shape[1]
         
         
         
         for i in reversed(range(self.num_layers)):
-            W, A_prev, Z = caches[i]
-
+            forward_cache, activation_cache = caches[i]
+            W, A_prev, Z = forward_cache
+            A, activation_grad = activation_cache
             if i == self.num_layers-1:
-                dZ = (y_pred - Y) / m
+                if self.loss == "MSE":
+                    dZ = (y_pred - Y) / m
+                elif self.loss == "BCE":
+                    dZ = y_pred - Y
+                elif self.loss == "CCE":
+                    dZ = (y_pred - Y)/m
             else:
-                dZ = dA * (Z > 0)
+                # dZ = dA * (Z > 0) #for relu
+               
+                dZ = dA * activation_grad
 
 
-            grads['dW' + str(i + 1)] = np.dot(dZ, A_prev.T)
-            grads['db' + str(i + 1)] = np.mean(dZ, axis=1, keepdims=True)
+            self.grads['dW' + str(i + 1)] = np.dot(dZ, A_prev.T)
+            self.grads['db' + str(i + 1)] = np.sum(dZ, axis=1, keepdims=True)
+            
             
             if i > 0:
                 dA = np.dot(W.T, dZ)
                 
         
-        return grads
 
-    def optimize(self, grads, learning_rate=0.001, tau= 0.001):
+
+    def optimize(self, grads, learning_rate=0.001, tau= 0.1):
         for i in range(1, self.num_layers + 1):
             W_temp = self.parameters['W' + str(i)] - learning_rate * grads['dW' + str(i)]
             b_temp = self.parameters['b' + str(i)] - learning_rate * grads['db' + str(i)]
@@ -198,10 +269,10 @@ class NeuralNetwork():
         """
         _, y_pred = self.forward_propagation(X)
         
-        if self.loss == "Binary Cross-Entropy":  # Binary classification
+        if self.loss == "BCE":  # Binary classification
             # Apply thresholding to sigmoid output
             predictions = (y_pred > threshold).astype(int)
-        elif self.loss == "Sparse Categorical Cross-Entropy":  # Multi-class classification
+        elif self.loss == "CCE":  # Multi-class classification
             # Select class with highest probability for each example
             predictions = np.argmax(y_pred, axis=0)
         elif self.loss == "MSE":
@@ -224,24 +295,33 @@ class NeuralNetwork():
         - predictions: Predicted labels (binary or multi-class).
         """
         caches, y_pred = self.forward_propagation(X)  # Get raw probabilities
+        # assert y_pred.shape == Y.shape
+
         loss = self.compute_loss(y_pred, Y)  # Compute loss using probabilities
         predictions = self.predict(X)  # Get discrete predictions
         return loss, predictions
 
 
-    def model_train(self, X_batch, Y_batch, learning_rate):
+    def grad_check(self):
+        for key, val in self.parameters:
+            print(key)
+            print(val)
+
+
+    def model_train(self, X_batch, Y_batch, learning_rate, decay_rate=0.01):
         self.iteration += 1
         caches, y_pred = self.forward_propagation(X_batch)
         loss = self.compute_loss(y_pred, Y_batch)
         
-        # if np.isnan(loss):
-        #     return loss
             
-        grads = self.back_propagation(y_pred, Y_batch, caches)
-        # grads = self.clip_gradients(grads)
-        
-        # Modified learning rate decay
-        self.learning_rate = 0.01 * (0.95 ** (self.iteration // 200))
-        self.optimize(grads, learning_rate=learning_rate)
+        self.back_propagation(y_pred, Y_batch, caches)
+    
+        learning_rate = learning_rate / (1 + decay_rate * self.iteration)
+
+        self.grads = self.clip_gradients(self.grads, threshold=1.0)
+
+        self.optimize(self.grads, learning_rate=learning_rate)
         
         return loss
+    
+
