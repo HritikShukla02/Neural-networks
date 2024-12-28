@@ -129,18 +129,18 @@ class NeuralNetwork():
         y_pred = np.clip(y_pred, epsilon, 1 - epsilon)  # Clip predictions to avoid log(0)
         m = Y.shape[1]
         if self.loss == "MSE":
-            loss = np.mean((y_pred - Y) ** 2, axis=1) / 2
+            loss = np.sum((y_pred - Y) ** 2, axis=1) / (2*m)
         elif self.loss == "BCE":
-            loss = -np.mean(Y * np.log(y_pred) + (1 - Y) * np.log(1 - y_pred), axis=1)
+            loss = -np.sum(Y * np.log(y_pred) + (1 - Y) * np.log(1 - y_pred))/m
         elif self.loss == "CCE":
             # loss = -np.mean(np.sum(Y * np.log(y_pred), axis=1))
             if self.class_weights is not None:
-                weighted_loss = -np.sum(self.class_weights * Y * np.log(y_pred + 1e-15), axis=1)
-                loss = np.mean(weighted_loss)  # Average loss over batch
+                weighted_loss = -np.sum(self.class_weights * Y * np.log(y_pred + 1e-15), axis=1)/m
+                loss = np.mean(weighted_loss)/m  # Average loss over batch
             else:
-                loss = -np.mean(np.sum(Y * np.log(y_pred + 1e-15), axis=1))  # divide by batch size
+                loss = -np.mean(np.sum(Y * np.log(y_pred + 1e-15)))/m  # divide by batch size
         # loss = np.mean(np.power(y_pred - Y, 2), axis=1)/2
-
+        loss = np.squeeze(loss)
         return loss
 
    
@@ -167,8 +167,8 @@ class NeuralNetwork():
                 dZ = dA * activation_grad
 
 
-            self.grads['dW' + str(i + 1)] = np.dot(dZ, A_prev.T)
-            self.grads['db' + str(i + 1)] = np.sum(dZ, axis=1, keepdims=True)
+            self.grads['dW' + str(i + 1)] = np.dot(dZ, A_prev.T)/m
+            self.grads['db' + str(i + 1)] = np.sum(dZ, axis=1, keepdims=True)/m
             
             
             if i > 0:
